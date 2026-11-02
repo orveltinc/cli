@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.env.*
+*.tsbuildinfo
+.moon/cache/
+test/results/
+test/report/
