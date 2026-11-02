@@ -1,6 +1,7 @@
 name: Verify CLI
 
 on:
+  workflow_call:
   pull_request:
   push:
     branches: [main]

@@ -2,7 +2,7 @@
 
 Use Orvelt Business from a terminal through the Business API, using browser OAuth, organization selection, and per-resource permissions. MCP is not involved in CLI calls. The CLI discovers operations from the server, so it follows the current API surface and your granted permissions.
 
-Requires **Bun 1.4.2 or later**. This is the standalone source repository for `@orvelt/cli`, maintained by Orvelt Inc. The npm package has not been published yet.
+Requires **Bun 1.4.2 or later**. This is the standalone source repository for `@orvelt/cli`, maintained by Orvelt Inc. Install it with `npm install -g @orvelt/cli`. The CLI is distributed under the [Apache License 2.0](LICENSE).
 
 ## Run from source
 
@@ -271,6 +271,6 @@ bun run typecheck
 bun run test
 ```
 
-Builds, tests, and future npm releases run from this repository root, independently of the storefront monorepo. GitHub Actions verifies pull requests and `main`; it does not publish to npm.
+Builds, tests, and future npm releases run from this repository root, independently of the storefront monorepo. GitHub Actions verifies pull requests and `main`. After the initial npm publication, run the **Publish CLI** workflow manually on `main` to verify and publish the exact package archive through npm trusted publishing. Version tags do not publish automatically.
 
 Unit tests use local protocol fixtures and isolated credential storage. Integration tests run the built executable against the official generic Better Auth OAuth provider, an in-memory adapter, and the oRPC HTTP server. The fixture rejects any MCP request. They exercise signed organization selection/consent, read-only and write grants, declined persistent access, organization isolation, live consent deletion, and logout. They do not use a staging database, grant production access, or mutate a production organization.

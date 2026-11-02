@@ -2,6 +2,7 @@
   "name": "@orvelt/cli",
   "version": "0.1.1",
   "author": "Orvelt Inc.",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/orveltinc/cli.git"
@@ -19,7 +20,9 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "NOTICE"
   ],
   "engines": {
     "bun": ">=1.4.2"
