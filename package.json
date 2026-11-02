@@ -1,0 +1,59 @@
+{
+  "name": "@orvelt/cli",
+  "version": "0.1.1",
+  "author": "Orvelt Inc.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orveltinc/cli.git"
+  },
+  "homepage": "https://github.com/orveltinc/cli#readme",
+  "bugs": {
+    "url": "https://github.com/orveltinc/cli/issues"
+  },
+  "packageManager": "bun@1.4.4",
+  "trustedDependencies": [],
+  "description": "Orvelt Business CLI with browser OAuth and organization-scoped permissions.",
+  "type": "module",
+  "bin": {
+    "orvelt": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "bun": ">=1.4.2"
+  },
+  "scripts": {
+    "dev": "bun src/index.ts",
+    "build": "bun build src/index.ts src/jq-worker.ts --target=bun --outdir=dist",
+    "prepack": "bun run build",
+    "test": "bun run build && bun test test/unit test/integration --timeout 30000",
+    "test-unit": "bun test test/unit",
+    "test-integration": "bun run build && bun test test/integration --timeout 30000",
+    "typecheck": "tsc --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler --lib ESNext,DOM,DOM.Iterable --types bun --allowImportingTsExtensions src/index.ts src/jq-worker.ts test/unit/*.ts test/integration/*.ts test/support/*.ts",
+    "lint": "oxlint src test",
+    "format:check": "oxfmt --check src test package.json README.md .github .oxlintrc.json .oxfmtrc.json"
+  },
+  "dependencies": {
+    "@orpc/client": "2.0.0-beta.44",
+    "@toon-format/toon": "4.4.0",
+    "commander": "15.0.0",
+    "jq-wasm": "3.0.0-jq-1.8.2",
+    "oauth4webapi": "^3.8.8",
+    "yaml": "2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@better-auth/oauth-provider": "1.7.14",
+    "@orpc/server": "2.0.0-beta.44",
+    "@types/bun": "1.4.4",
+    "better-auth": "1.7.14",
+    "typescript": "^7.0.2",
+    "oxlint": "^1.86.0",
+    "oxfmt": "0.74.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
