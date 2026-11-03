@@ -20,6 +20,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
@@ -28,6 +31,10 @@ jobs:
       - run: bun run format:check
       - run: bun run typecheck
       - run: bun run test
+      - name: Verify OAuth with Node
+        run: ORVELT_CLI_TEST_RUNTIME="$(node -p process.execPath)" bun run test-integration
+      - name: Verify installed runtime compatibility
+        run: bun run test:compatibility
       - run: bun audit
       - name: Pack verified CLI
         run: |

@@ -170,6 +170,8 @@ export class CliOAuthProvider {
       refreshState: undefined,
     });
     if (!credential.success) throw new AuthError('OAuth returned invalid credentials.', 'security');
+    // The server has already issued/rotated these tokens. Persist them even if
+    // the command was cancelled, before releasing the caller's credential lock.
     await this.options.store.write(this.options.server, credential.data);
     this.credential = credential.data;
   }
@@ -185,10 +187,11 @@ export class CliOAuthProvider {
     // This write is inside the caller's cross-process credential lock. If the
     // process dies or the request is cancelled after dispatch, the marker
     // prevents another process from replaying the old rotated token.
-    await this.options.store.write(this.options.server, {
-      ...previous,
-      refreshState: 'uncertain',
-    });
+    await this.options.store.write(
+      this.options.server,
+      { ...previous, refreshState: 'uncertain' },
+      this.options.signal,
+    );
     checkAbort(this.options.signal);
     const response = await oauth.refreshTokenGrantRequest(
       metadata,
@@ -206,6 +209,8 @@ export class CliOAuthProvider {
       // malformed bodies, and processing failures remain uncertain because a
       // proxy may have hidden a committed rotation.
       if (error instanceof oauth.ResponseBodyError) {
+        // A definite rejection did not rotate the token. Finish restoring the
+        // previous entry under the lock, independently of command cancellation.
         await this.options.store.write(this.options.server, previous);
         this.credential = previous;
       }

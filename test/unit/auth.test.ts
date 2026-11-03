@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { connect } from 'node:net';
 
 import {
   authStatus,
@@ -549,6 +550,23 @@ describe('OAuth and direct Business API', () => {
     expect((await readdir(directory)).some((name) => name.endsWith('.lock'))).toBe(false);
   });
 
+  // Risk: cancellation during non-cancellable persistence/local work returns a
+  // successful command even though its deadline has expired. Use the public
+  // connection boundary and explicit temporary file storage, never the keychain.
+  test('cancellation is reported after local work settles and releases the credential lock', async () => {
+    const fake = protocolServer();
+    await fake.authorize();
+    const abort = new AbortController();
+    await expect(
+      withApiClient({ ...fake.options, signal: abort.signal }, async () => {
+        abort.abort();
+        return 'finished local work';
+      }),
+    ).rejects.toMatchObject({ kind: 'cancelled' });
+    expect((await readdir(directory)).some((name) => name.endsWith('.lock'))).toBe(false);
+    expect(await createCredentialStore().read(fake.resource)).toBeDefined();
+  });
+
   test('near-expiry access tokens without refresh tokens remain usable until expiry', async () => {
     const fake = protocolServer();
     await fake.authorize();
@@ -796,7 +814,7 @@ describe('OAuth and direct Business API', () => {
 
 describe('loopback callback boundary', () => {
   test('exact method/path/host/state, unique parameters, and one-use code', async () => {
-    const callback = createCallback(AbortSignal.timeout(2000));
+    const callback = await createCallback(AbortSignal.timeout(2000));
     try {
       const valid = new URL(callback.redirectUri);
       valid.searchParams.set('state', callback.state);
@@ -817,6 +835,88 @@ describe('loopback callback boundary', () => {
       await callback.close();
     }
     await expect(fetch(callback.redirectUri)).rejects.toThrow();
+  });
+
+  test('malformed absolute request targets are rejected without escaping the server process', async () => {
+    const callback = await createCallback(AbortSignal.timeout(2000));
+    const socket = connect(Number(new URL(callback.redirectUri).port), '127.0.0.1');
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('connect', () => {
+          socket.write('GET http://[ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n');
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      await new Promise<void>((resolve, reject) => {
+        socket.once('data', (data) => {
+          expect(data.toString()).toContain('400');
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+    } finally {
+      socket.destroy();
+      await callback.close();
+    }
+  });
+
+  test('close drains a callback response before forcing held-open connections', async () => {
+    const callback = await createCallback(AbortSignal.timeout(2000));
+    const url = new URL(callback.redirectUri);
+    url.searchParams.set('state', callback.state);
+    url.searchParams.set('code', 'drain-me');
+    const socket = connect(Number(url.port), '127.0.0.1');
+    let response = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => (response += chunk));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('connect', () => {
+          socket.write(
+            `GET ${url.pathname}${url.search} HTTP/1.1\r\nHost: ${url.host}\r\nConnection: keep-alive\r\n\r\n`,
+          );
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      await callback.result;
+      await new Promise<void>((resolve, reject) => {
+        if (response.includes('HTTP/1.1 200')) return resolve();
+        socket.once('data', () => resolve());
+        socket.once('error', reject);
+      });
+      await callback.close();
+      expect(response).toContain('HTTP/1.1 200');
+      expect(response).toContain('Authorization received.');
+    } finally {
+      socket.destroy();
+    }
+  });
+
+  test('close force-closes a client that holds an incomplete request open', async () => {
+    const callback = await createCallback(AbortSignal.timeout(2000));
+    const url = new URL(callback.redirectUri);
+    const socket = connect(Number(url.port), '127.0.0.1');
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('connect', () => {
+          socket.write(`GET ${url.pathname} HTTP/1.1\r\nHost: ${url.host}\r\n`);
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      const started = performance.now();
+      await Promise.race([
+        callback.close(),
+        Bun.sleep(1000).then(() => {
+          throw new Error('callback close did not finish');
+        }),
+      ]);
+      expect(performance.now() - started).toBeLessThan(500);
+    } finally {
+      socket.destroy();
+    }
   });
 });
 

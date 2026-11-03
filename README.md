@@ -1,26 +1,39 @@
 # Orvelt CLI
 
-Use Orvelt Business from a terminal through the Business API, using browser OAuth, organization selection, and per-resource permissions. MCP is not involved in CLI calls. The CLI discovers operations from the server, so it follows the current API surface and your granted permissions.
+Manage Orvelt Business from your terminal. Sign in with your browser, choose an organization, and discover the API operations your account can use.
 
-Requires **Bun 1.4.2 or later**. This is the standalone source repository for `@orvelt/cli`, maintained by Orvelt Inc. Install it with `npm install -g @orvelt/cli`. The CLI is distributed under the [Apache License 2.0](LICENSE).
+This is the standalone source repository for `@orvelt/cli`, maintained by Orvelt Inc. The CLI is distributed under the [Apache License 2.0](LICENSE).
 
-## Run from source
+Requires **Node.js 20.19 or later**, or **Bun 1.3.3 or later**. Prefer a maintained Node.js LTS release. The repository's development scripts use Bun; the built CLI does not require it.
 
-From the repository root:
+These runtime compatibility changes are not released yet. The current npm release, **0.1.1**, requires Bun 1.4.2 or later. To use Node.js or an earlier Bun version before the next release, [build and install a tarball from this checkout](#development).
+
+## Install
+
+Choose your package manager. The Node.js examples require a release containing these compatibility changes; the current release can be run with `bunx --bun` on Bun 1.4.2 or later.
+
+| Package manager | Install or run                     |
+| --------------- | ---------------------------------- |
+| npm             | `npm install --global @orvelt/cli` |
+| pnpm            | `pnpm add --global @orvelt/cli`    |
+| Yarn 2+         | `yarn dlx @orvelt/cli --help`      |
+| Yarn Classic    | `yarn global add @orvelt/cli`      |
+| Bun             | `bunx --bun @orvelt/cli --help`    |
+
+For a one-off Node invocation, use `npx @orvelt/cli --help` or `pnpm dlx @orvelt/cli --help`. Replace `--help` with the command you want to run. Bun-only installations should use `bunx --bun` to override the executable's Node shebang.
+
+For the unreleased compatibility fixes, install a local tarball using the [development instructions](#development) instead of the registry package.
+
+## Quick start
 
 ```sh
-bun install --frozen-lockfile --ignore-scripts
-bun src/index.ts --help
-bun src/index.ts auth login
+orvelt auth login
+orvelt auth status
+orvelt tools list
+orvelt call projects_list
 ```
 
-To build and link the `orvelt` command locally:
-
-```sh
-bun run build
-bun link
-orvelt --help
-```
+Only `auth login` opens an authentication flow. Other commands never prompt you to sign in or launch a browser.
 
 ## Sign in and approve permissions
 
@@ -36,7 +49,7 @@ To request permission to change business data:
 orvelt auth login --write
 ```
 
-The permissions window still controls what you grant. Organization roles and project-team membership are checked by the server on each operation. A read-only connection does not list write operations.
+In the permissions window, select **Write** for each resource you want to change before approving. `--write` requests that option; it does not select it for you. Organization roles and project-team membership are checked by the server on each operation. A read-only connection does not list write operations.
 
 For a browser that must be opened manually on the same computer:
 
@@ -45,6 +58,21 @@ orvelt auth login --no-browser
 ```
 
 The authorization URL is printed to stderr. The browser must be able to reach the CLI's local `127.0.0.1` callback. This is a loopback OAuth flow, not a device-code flow; copying the link to another computer without forwarding the callback port will not complete it. Login waits up to five minutes; change that with `--login-timeout 600` or cancel with Ctrl+C.
+
+Check the saved connection and verify the live grant:
+
+```sh
+orvelt auth status
+orvelt auth status --json
+```
+
+Sign out from the current server:
+
+```sh
+orvelt auth logout
+```
+
+Logout revokes the refresh token before removing local credentials. An access token may remain valid until expiry; see [credentials and logout](#credentials-and-logout). If revocation cannot complete, credentials are retained so you can retry. To remove only this machine's credentials, use `orvelt auth logout --local`.
 
 ## Discover and call operations
 
@@ -166,7 +194,7 @@ orvelt auth status --json
 orvelt auth logout
 ```
 
-Credentials are stored in the operating-system credential store through `Bun.secrets`. Status reports whether credentials are stored and makes a read-only server request to verify the current grant. It distinguishes verified connections, connections requiring reauthentication, and connections it could not verify. It never prints tokens.
+Credentials use the operating-system credential store through a native binding: macOS Keychain, Windows Credential Manager, or Linux Secret Service. Linux needs a running Secret Service. macOS may ask permission when a different Node or Bun executable accesses a saved entry. Status reports whether credentials are stored and makes a read-only server request to verify the current grant. It distinguishes verified connections, connections requiring reauthentication, and connections it could not verify. It never prints tokens.
 
 Logout revokes the refresh token before removing local storage and attempts access-token revocation too. Better Auth uses self-contained access JWTs, which cannot be revoked individually: the CLI reports `accessTokenRevocation: unsupported` and warns that access may remain valid until expiry (about five minutes). To invalidate the grant immediately, disconnect it from **Integrations → Business MCP → Connected apps** in Orvelt Business. If a revocation request fails for another reason, credentials are retained and logout fails. To erase only local credentials, explicitly use `orvelt auth logout --local`; this does not revoke server authorization.
 
@@ -178,9 +206,9 @@ export ORVELT_CONFIG_DIR="$HOME/.config/orvelt-ci"
 orvelt auth login --no-browser
 ```
 
-File storage contains plaintext credentials protected by owner-only permissions. Keep that directory outside source control and shared folders. There is no automatic fallback from a failed keychain to plaintext. Keep the same storage settings for subsequent commands and logout.
+File storage contains plaintext credentials protected by owner-only permissions on macOS and Linux. It is unavailable on Windows because the CLI does not verify Windows file ACLs; use the OS credential store there. Keep that directory outside source control and shared folders. There is no automatic fallback from a failed keychain to plaintext. Keep the same storage settings for subsequent commands and logout.
 
-Commands sharing a credential entry are serialized to protect refresh-token rotation. If a process is force-killed, a later command may report a stale lock directory. Confirm that no CLI process is using that endpoint, then remove only the empty `.lock` directory named in the error.
+Commands sharing a credential entry are serialized to protect refresh-token rotation. A credential write or deletion already in progress must finish before cancellation releases its lock. If a process is force-killed, a later command may report a stale lock directory. Confirm that no CLI process is using that endpoint, then remove only the empty `.lock` directory named in the error.
 
 ## Environments and timeouts
 
@@ -194,83 +222,41 @@ orvelt call projects_list --timeout 60
 
 Remote endpoints require HTTPS. Plain HTTP is accepted only for loopback development. `--timeout` bounds network work and credential-lock wait (30 seconds by default; 1–600 seconds accepted). Each jq compilation/execution phase uses the same timeout bound.
 
-Deployment prerequisite: deploy the shared OAuth API authorization and consent UI together. The API must advertise its exact resource URL and public-client registration endpoint. Existing MCP-specific grants and registrations must reconnect with `business:read` / `business:write`; no automatic permission upgrade or token-audience fallback is performed.
-
 Exit codes: `0` success, `1` operation/authentication failure, `2` invalid command or JSON input, `130` cancellation. Tool failures are written to stderr with their structured result when available.
 
-## Libraries and boundaries
+## Development
 
-| Option                                          | Fit                                                                                                                                                                                              |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [Commander](https://github.com/tj/commander.js) | **Selected.** Mature strict argument parsing, nested commands, generated help, environment options, and testable output/exit handling. Bundles with Bun without imposing another project layout. |
-| [oclif](https://oclif.io/docs/introduction/)    | Strong plugin and distribution framework. Its project conventions and plugin lifecycle add machinery this CLI does not currently need.                                                           |
-| [citty](https://github.com/unjs/citty)          | Lightweight, typed definitions and lazy commands. A good small-CLI choice; Commander provides the explicit error/output hooks and established parser behavior used here.                         |
+Building and running the repository's tests uses Bun. Consumers of the built package do not need Bun.
 
-`oauth4webapi` handles OAuth discovery validation, PKCE, authorization responses, token exchange, and refresh. The oRPC HTTP client calls the Business API directly and serializes file uploads. The CLI contains no MCP dependency. The server's contract-derived OAuth catalog provides operation names and schemas; the API independently authorizes every execution.
-
-### Speakeasy evaluation
-
-On October 31, 2026, we generated a separate Go/Cobra CLI from 63 OAuth-exposed Business operations using the open-source [Speakeasy generator](https://github.com/speakeasy-api/openapi-generation/tree/5d9a4c98764d0f89a216c8f17a121002cb97671e). The comparison export used the shared contract/OpenAPI policy, selected OAuth operations, restricted security to the OAuth bearer alternative, and pointed at loopback rather than production. Generated source and binaries stay outside this workspace; no Speakeasy runtime dependency or generated source is included in this package.
-
-The generated binary compiled successfully. Local checks covered scoped KDL usage, aliases and positional path parameters, typed inputs/body precedence, schemas, request previews, shell completion, output formats/jq, structured failures, credential redaction, and bearer-authenticated GET/POST calls against loopback mocks. Schema/dry-run checks made no mock requests. The generated `auth login` for this bearer-only specification configures a token; it does not replace our browser authorization-code/PKCE flow. No evaluation contacted production or used real credentials.
-
-The first Business-only generation did **not** exercise the generator's full feature set. A second, separately generated capability probe added cursor/page pagination, NDJSON, and a binary response. Executed results:
-
-| Probe               | Observed result                                                                            |
-| ------------------- | ------------------------------------------------------------------------------------------ |
-| Cursor `--all`      | Two pages streamed as NDJSON; stopped at a null continuation.                              |
-| `--max-pages 1`     | Exactly one request, with no speculative next-page fetch.                                  |
-| Repeated cursor     | Failed with `CLI_PROTOCOL` before a third request; earlier stdout remained partial output. |
-| Page-number `--all` | Requested pages 1, 2, and 3 exactly.                                                       |
-| NDJSON stream       | First output arrived before the server ended the stream.                                   |
-| Binary download     | `--output-file` wrote the exact four-byte fixture.                                         |
-
-Those features require transport/response metadata. Their absence from the original generated command tree was not evidence that Speakeasy lacked them.
-
-| Capability                                               | Decision for this CLI                                                                                                                                          |
-| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Machine-readable usage                                   | Adopted as scoped offline JSON `--usage`, derived from Commander.                                                                                              |
-| Operation input schema                                   | Adopted as `call <operation> --schema`, using the live grant rather than bundled schemas.                                                                      |
-| Request preview                                          | Adopted using the real RPC serializer; explicit catalog snapshots allow no-network/no-keychain previews.                                                       |
-| Schema validation                                        | Adopted through Zod's JSON-Schema adapter, without silently transforming caller input. All 63 current catalog schemas compiled in a local compatibility check. |
-| Typed field input                                        | Adapted as `--set field=JSON`; preserves types without generating a stale per-operation flag tree.                                                             |
-| Shell completion                                         | Adopted for four shells, offline for local commands/flags/enum values.                                                                                         |
-| Tables, pretty, YAML, TOON, jq/raw output                | Adopted independently, with actual response values and worker-isolated real jq.                                                                                |
-| Agent mode and structured parser errors                  | Adopted with explicit opt-out, consistent JSON failures, hints, and unchanged exit codes.                                                                      |
-| Binary/credential diagnostic redaction                   | Adopted with byte summaries, control-character sanitization, and bounded diagnostics.                                                                          |
-| Named resource commands, aliases, positional path inputs | Still absent. A live command facade needs collision handling and authoritative parameter metadata; `--set` is not equivalent to schema-generated flags.        |
-| Path-based multipart uploads                             | Still absent. Current base64 inputs remain limited to 1 MiB and are not equivalent to the API's larger native-file limits.                                     |
-| Interactive explorer and missing-field prompts           | Not added: operations stay non-interactive and cannot unexpectedly prompt or open a browser.                                                                   |
-| Automatic pagination                                     | Verified in the separate probe, not implemented here. Our catalog needs explicit response/continuation metadata; operation names are not enough.               |
-| SSE/JSONL streaming and binary response output           | NDJSON/downloads verified in the separate probe; SSE source-reviewed only. No generic streaming/download path is added to our RPC client.                      |
-| Debug/response headers/custom headers                    | Reviewed, not adopted. A safe transport hook must avoid consuming bodies or exposing cookies/tokens; arbitrary headers must not override OAuth.                |
-| Retry policy                                             | Reviewed, not adopted. Preserve no-replay mutation behavior; automatic read pagination is a separate concern from retrying writes.                             |
-| Native binaries and release installers                   | Worth a separate distribution task; this evaluation does not publish artifacts or add a release pipeline.                                                      |
-| Generated auth/config defaults                           | Not adopted: keep browser PKCE, organization consent, rotated-refresh locking, and explicit opt-in to plaintext storage.                                       |
-
-Further generator capabilities were reviewed in source/tests, not executed in the probe:
-
-- **Declarative intents** (`x-speakeasy-cli-commands`): curated names, aliases, categories, examples, presets, schema-bound arguments, route selection, and command-specific hints. Routes select variants of one operation; this is not an arbitrary multi-operation workflow engine.
-- **Async/resume**: create once, poll a declared operation with backoff/timeout, resume an existing handle without recreating it, and distinguish success/failure/handoff/unknown states.
-- **Artifacts and outcomes**: select content through declared pointers, write base64 media with MIME-derived filenames, return raw responses explicitly, and fail on declared failure states even when HTTP status is successful. URI-only artifact download is not generally supported.
-- **Offline enum catalogs**: grouped descriptions and command-specific defaults, distinct from the API's permission-filtered operation catalog.
-- **Human interaction**: explicit explorer, missing-field prompts, centralized TTY/agent gating, and a delayed progress indicator. These are useful capabilities, not prerequisites for scripted calls.
-- **Distribution and maintenance**: cross-platform GoReleaser artifacts, checksums, optional Homebrew/WinGet/Linux packages, version injection, custom regions, persistent patches/three-way merges, and generated example/dry-run tests. Installer checksum verification and real platform publication must be verified separately; generated configuration is not a shipped release.
-
-Two cautions from the runtime review: generated whole-body input can accept missing fields that individual required flags reject, and typed presentation output can drop fields outside its generated model. We do not treat generation as proof of validation or wire fidelity. Likewise, schema snapshots are never permission grants, and HTTP-success bodies are not heuristically reclassified as failures without a declared outcome contract.
-
-The generator's [licensing policy](https://github.com/speakeasy-api/openapi-generation/blob/5d9a4c98764d0f89a216c8f17a121002cb97671e/LICENSING.md) requires an explicit AGPL output election or commercial authorization. The temporary comparison elected AGPL; the features here are independent implementations, not copied generated code. Generation also reported a nullable-value support warning and pagination annotation hints, so successful generation alone does not establish full transport compatibility.
-
-## Development checks
+From the repository root:
 
 ```sh
 bun install --frozen-lockfile --ignore-scripts
-bun run lint
-bun run format:check
-bun run typecheck
-bun run test
+bun run build
+bun pm pack --ignore-scripts --filename orvelt-cli.tgz
+npm install --global ./orvelt-cli.tgz
+orvelt --help
 ```
 
-Builds, tests, and future npm releases run from this repository root, independently of the storefront monorepo. GitHub Actions verifies pull requests and `main`. After the initial npm publication, run the **Publish CLI** workflow manually on `main` to verify and publish the exact package archive through npm trusted publishing. Version tags do not publish automatically.
+Use `pnpm add --global ./orvelt-cli.tgz` or `yarn global add "file:$PWD/orvelt-cli.tgz"` (Yarn Classic) instead of npm if preferred. With Bun alone, run `bun dist/index.js --help`.
+
+Run checks from the repository root:
+
+```sh
+bun run test
+bun run typecheck
+bun run lint
+bun run format:check
+```
+
+Check isolated npm, pnpm, Yarn, and Bun installations with `bun run test:compatibility`. Set `ORVELT_SMOKE_NODE_BINARIES` to a comma-separated list of absolute Node executable paths to test multiple runtimes. These checks use disposable file storage and do not access your keychain.
+
+To run the OAuth integration suite against a particular Node executable:
+
+```sh
+ORVELT_CLI_TEST_RUNTIME=/path/to/node bun run test-integration
+```
 
 Unit tests use local protocol fixtures and isolated credential storage. Integration tests run the built executable against the official generic Better Auth OAuth provider, an in-memory adapter, and the oRPC HTTP server. The fixture rejects any MCP request. They exercise signed organization selection/consent, read-only and write grants, declined persistent access, organization isolation, live consent deletion, and logout. They do not use a staging database, grant production access, or mutate a production organization.
+
+Authentication follows the explicit [`gh auth`](https://cli.github.com/manual/gh_auth) command structure and [RFC 8252](https://www.rfc-editor.org/rfc/rfc8252): an external browser, authorization code with PKCE, and a loopback callback. `oauth4webapi` validates the OAuth exchange; API calls use oRPC directly.
