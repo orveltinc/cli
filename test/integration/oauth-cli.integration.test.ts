@@ -13,9 +13,10 @@ async function fixture() {
   const executable =
     process.env.ORVELT_CLI_TEST_EXECUTABLE ??
     new URL('../../dist/index.js', import.meta.url).pathname;
+  const runtime = process.env.ORVELT_CLI_TEST_RUNTIME ?? process.execPath;
   async function command(args: string[]) {
     const child = Bun.spawn(
-      [process.execPath, executable, '--server', authority.resource, '--json', ...args],
+      [runtime, executable, '--server', authority.resource, '--json', ...args],
       {
         env: {
           ...Bun.env,

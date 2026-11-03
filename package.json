@@ -25,23 +25,26 @@
     "NOTICE"
   ],
   "engines": {
-    "bun": ">=1.4.2"
+    "node": ">=20.19.0",
+    "bun": ">=1.3.3"
   },
   "scripts": {
     "dev": "bun src/index.ts",
-    "build": "bun build src/index.ts src/jq-worker.ts --target=bun --outdir=dist",
+    "build": "bun build src/index.ts src/jq-worker.ts --target=node --external @napi-rs/keyring --outdir=dist",
     "prepack": "bun run build",
     "test": "bun run build && bun test test/unit test/integration --timeout 30000",
     "test-unit": "bun test test/unit",
+    "test:compatibility": "node test/smoke/package-managers.mjs",
     "test-integration": "bun run build && bun test test/integration --timeout 30000",
     "typecheck": "tsc --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler --lib ESNext,DOM,DOM.Iterable --types bun --allowImportingTsExtensions src/index.ts src/jq-worker.ts test/unit/*.ts test/integration/*.ts test/support/*.ts",
     "lint": "oxlint src test",
     "format:check": "oxfmt --check src test package.json README.md .github .oxlintrc.json .oxfmtrc.json"
   },
   "dependencies": {
+    "@napi-rs/keyring": "^2.1.2",
     "@orpc/client": "2.0.0-beta.44",
     "@toon-format/toon": "4.4.0",
-    "commander": "15.0.0",
+    "commander": "14.0.3",
     "jq-wasm": "3.0.0-jq-1.8.2",
     "oauth4webapi": "^3.8.8",
     "yaml": "2.9.1",

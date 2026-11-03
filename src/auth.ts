@@ -60,9 +60,18 @@ async function run<T>(
     checkAbort(timer.signal);
     const store = createCredentialStore();
     return await store
-      .withLock(server, timer.signal, () =>
-        action({ server, signal: timer.signal, store, timeoutMs: options.timeoutMs }),
-      )
+      .withLock(server, timer.signal, async () => {
+        const result = await action({
+          server,
+          signal: timer.signal,
+          store,
+          timeoutMs: options.timeoutMs,
+        });
+        // Started credential mutations must settle under the lock even when the
+        // deadline expires. Do not report command success after cancellation.
+        checkAbort(timer.signal);
+        return result;
+      })
       .catch((error: unknown) => {
         throw safeError(error, timer.signal);
       });
@@ -85,8 +94,8 @@ export async function login(
 ): Promise<unknown> {
   return run(options, async ({ server, signal, store }) => {
     // Check storage before opening a browser; an old grant is retained if the new login fails.
-    const previous = await store.read(server);
-    const callback = createCallback(signal);
+    const previous = await store.read(server, signal);
+    const callback = await createCallback(signal);
     try {
       const discovery = await discover(server, signal);
       const scopes: Credential['scopes'] = options.write
@@ -228,7 +237,7 @@ export async function withApiClient<T>(
   action: (client: BusinessApiClient) => Promise<T>,
 ): Promise<T> {
   const outcome = await run(options, async (context) => {
-    const credential = await context.store.read(context.server);
+    const credential = await context.store.read(context.server, context.signal);
     if (!credential) throw loginRequired();
     return connected(context, credential, (client) =>
       action(client).then(
@@ -247,7 +256,7 @@ export async function withApiClient<T>(
 
 export async function authStatus(options: ConnectionOptions): Promise<unknown> {
   return run(options, async (context) => {
-    const credential = await context.store.read(context.server);
+    const credential = await context.store.read(context.server, context.signal);
     if (!credential) return { server: context.server, stored: false, validity: 'not_checked' };
     // Listing is read-only and checks the live grant/membership, unlike a local JWT decode.
     const verification = await connected(context, credential, (client) =>
@@ -271,7 +280,7 @@ export async function authStatus(options: ConnectionOptions): Promise<unknown> {
       },
     );
     return {
-      ...summary((await context.store.read(context.server)) ?? credential),
+      ...summary((await context.store.read(context.server, context.signal)) ?? credential),
       stored: true,
       ...verification,
     };
@@ -280,11 +289,11 @@ export async function authStatus(options: ConnectionOptions): Promise<unknown> {
 
 export async function logout(options: ConnectionOptions & { local: boolean }): Promise<unknown> {
   return run(options, async ({ server, signal, store }) => {
-    const credential = await store.read(server);
+    const credential = await store.read(server, signal);
     if (!credential)
       return { server, stored: false, localDeleted: false, revocation: 'not_attempted' };
     if (options.local) {
-      await store.delete(server);
+      await store.delete(server, signal);
       return {
         server,
         stored: false,
@@ -358,7 +367,7 @@ export async function logout(options: ConnectionOptions & { local: boolean }): P
       }
       if (hint === 'refresh_token') refreshRevoked = true;
     }
-    await store.delete(server);
+    await store.delete(server, signal);
     return {
       server,
       stored: false,

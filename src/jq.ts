@@ -1,5 +1,6 @@
 import { InputError } from './input';
 import type { JqInput } from 'jq-wasm/inline';
+import { Worker } from 'node:worker_threads';
 
 export class OutputError extends Error {
   readonly exitCode = 1;
@@ -44,9 +45,8 @@ class JqWorker {
   constructor(signal?: AbortSignal, timeoutMs = 30_000) {
     this.signal = signal;
     this.timeoutMs = timeoutMs;
-    this.worker = new Worker(workerURL(), { type: 'module' });
-    this.worker.addEventListener('message', (event: MessageEvent<WorkerReply>) => {
-      const message = event.data;
+    this.worker = new Worker(workerURL());
+    this.worker.on('message', (message: WorkerReply) => {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
@@ -54,8 +54,8 @@ class JqWorker {
       if (message.ok) pending.resolve(message.result);
       else pending.reject(new OutputError(message.error));
     });
-    this.worker.addEventListener('error', () => this.fail(new OutputError('jq worker failed.')));
-    this.worker.addEventListener('messageerror', () =>
+    this.worker.on('error', () => this.fail(new OutputError('jq worker failed.')));
+    this.worker.on('messageerror', () =>
       this.fail(new OutputError('jq worker returned an invalid result.')),
     );
     if (signal) {
@@ -74,7 +74,7 @@ class JqWorker {
         this.fail(new OutputError('jq output processing timed out.'));
       }, this.timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      // A Worker, not Window.postMessage: there is no targetOrigin argument.
+      // Worker postMessage has no Window target origin.
       // oxlint-disable-next-line unicorn/require-post-message-target-origin
       this.worker.postMessage({ ...message, id });
     });

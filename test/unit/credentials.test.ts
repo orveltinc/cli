@@ -3,6 +3,7 @@ import { chmod, lstat, mkdtemp, readdir, readFile, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCredentialStore, type Credential } from '../../src/credentials';
+import type { EntryOptions } from '@napi-rs/keyring';
 
 function required<T>(value: T | undefined): T {
   if (value === undefined) throw new Error('Missing required test fixture value');
@@ -45,6 +46,7 @@ describe('credential storage', () => {
     const values = new Map<string, string>();
     const store = createCredentialStore({
       env: {},
+      platform: 'win32',
       keychain: {
         async get({ name }) {
           return values.get(name) ?? null;
@@ -88,6 +90,193 @@ describe('credential storage', () => {
       expect(String(error)).toContain('No plaintext fallback');
       expect(String(error)).not.toContain('SECRET');
     }
+  });
+
+  // Risk: Linux auto-fallback silently stores credentials only until reboot.
+  // The fake models the external binding, not the credential store's behavior.
+  test('requires persistent Secret Service for native entries and fails closed when unavailable', async () => {
+    const values = new Map<string, string>();
+    let available = true;
+    const store = createCredentialStore({
+      env: {},
+      platform: 'linux',
+      async loadKeyring() {
+        return {
+          AsyncEntry: class {
+            constructor(
+              readonly service: string,
+              readonly name: string,
+              options?: EntryOptions,
+            ) {
+              expect(service).toBe('com.orvelt.business-cli.oauth');
+              expect(options).toEqual({ linux: { store: 'secret-service' } });
+              if (!available) throw new Error('NATIVE_SECRET');
+            }
+            async getPassword() {
+              return values.get(this.name) ?? null;
+            }
+            async setPassword(value: string) {
+              values.set(this.name, value);
+            }
+            async deletePassword() {
+              return values.delete(this.name);
+            }
+          },
+        };
+      },
+    });
+    await store.write(server, credential());
+    expect(await store.read(server)).toEqual(credential());
+    expect(await store.read('https://mcp.example.test/other')).toBeUndefined();
+    available = false;
+    for (const operation of [
+      () => store.read(server),
+      () => store.write(server, credential()),
+      () => store.delete(server),
+    ]) {
+      const error = await operation().catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ kind: 'storage' });
+      expect(String(error)).toContain('No plaintext fallback');
+      expect(String(error)).not.toContain('NATIVE_SECRET');
+    }
+    available = true;
+    await store.delete(server);
+    expect(await store.read(server)).toBeUndefined();
+  });
+
+  // Risk: a locked OS prompt outlives the command deadline. Exercise the store,
+  // replacing only native I/O; no real keychain is loaded or accessed.
+  test('cancels a pending credential read without exposing native errors', async () => {
+    const abort = new AbortController();
+    const store = createCredentialStore({
+      env: {},
+      async loadKeyring() {
+        return {
+          AsyncEntry: class {
+            async getPassword(signal?: AbortSignal | null) {
+              expect(signal).toBe(abort.signal);
+              return new Promise<null>((resolve, reject) => {
+                const timer = setTimeout(() => resolve(null), 100);
+                signal?.addEventListener(
+                  'abort',
+                  () => {
+                    clearTimeout(timer);
+                    reject(new Error('NATIVE_SECRET'));
+                  },
+                  { once: true },
+                );
+                abort.abort();
+              });
+            }
+            async setPassword() {}
+            async deletePassword() {
+              return false;
+            }
+          },
+        };
+      },
+    });
+    const error = await store.read(server, abort.signal).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ kind: 'cancelled' });
+    expect(String(error)).not.toContain('NATIVE_SECRET');
+  });
+
+  // Risk: an expired command starts a new OS mutation (or keychain prompt).
+  test('does not load native storage for already-cancelled reads, writes, or deletion', async () => {
+    let loads = 0;
+    const store = createCredentialStore({
+      env: {},
+      async loadKeyring() {
+        loads++;
+        throw new Error('Unexpected native access');
+      },
+    });
+    const signal = AbortSignal.abort();
+    for (const operation of [
+      () => store.read(server, signal),
+      () => store.write(server, credential(), signal),
+      () => store.delete(server, signal),
+    ]) {
+      await expect(operation()).rejects.toMatchObject({ kind: 'cancelled' });
+    }
+    expect(loads).toBe(0);
+  });
+
+  // Risk: aborting a native mutation settles it early and releases the lock
+  // while a side effect can still race the next process. Only the OS is faked;
+  // a temporary file-store lock keeps this test away from user directories.
+  test.each(['write', 'delete'] as const)(
+    'retains the lock until a started native %s settles after cancellation',
+    async (operation) => {
+      const { store: locks, dir } = await fixture();
+      const abort = new AbortController();
+      const started = Promise.withResolvers<void>();
+      const completion = Promise.withResolvers<void>();
+      let text: string | null = JSON.stringify(credential());
+      const updated = { ...credential(), refreshState: 'uncertain' as const };
+      function pending(signal?: AbortSignal | null) {
+        started.resolve();
+        signal?.addEventListener('abort', () => completion.reject(new Error('NATIVE_SECRET')), {
+          once: true,
+        });
+        return completion.promise;
+      }
+      const store = createCredentialStore({
+        env: {},
+        async loadKeyring() {
+          return {
+            AsyncEntry: class {
+              async getPassword() {
+                return text;
+              }
+              async setPassword(value: string, signal?: AbortSignal | null) {
+                text = value; // Cancellation is not proof the side effect did not happen.
+                await pending(signal);
+              }
+              async deletePassword(signal?: AbortSignal | null) {
+                text = null;
+                await pending(signal);
+                return true;
+              }
+            },
+          };
+        },
+      });
+      const outcome = locks
+        .withLock(server, abort.signal, () =>
+          operation === 'write'
+            ? store.write(server, updated, abort.signal)
+            : store.delete(server, abort.signal),
+        )
+        .then(
+          () => 'completed',
+          (error: unknown) => error,
+        );
+      try {
+        await started.promise;
+        abort.abort();
+        await expect(
+          locks.withLock(server, AbortSignal.timeout(30), async () => {}),
+        ).rejects.toThrow('lock wait');
+      } finally {
+        completion.resolve();
+        await outcome;
+      }
+      expect(await outcome).toBe('completed');
+      expect((await readdir(dir)).filter((name) => name.endsWith('.lock'))).toHaveLength(0);
+      expect(await store.read(server)).toEqual(operation === 'write' ? updated : undefined);
+    },
+  );
+
+  test('refuses plaintext storage when owner-only permissions cannot be verified', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'orvelt-credentials-win-'));
+    directories.push(dir);
+    expect(() =>
+      createCredentialStore({
+        platform: 'win32',
+        env: { ORVELT_CREDENTIAL_STORE: 'file', ORVELT_CONFIG_DIR: dir },
+      }),
+    ).toThrow('verifiable owner-only permissions');
   });
 
   test('file mode requires both explicit opt-in and config directory', () => {

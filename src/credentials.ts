@@ -4,6 +4,7 @@ import { lstat, mkdir, open, rename, rmdir, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
+import type { AsyncEntry, EntryOptions } from '@napi-rs/keyring';
 import { AuthError, checkAbort } from './auth/errors';
 
 const tokensSchema = z.object({
@@ -43,11 +44,28 @@ export const credentialSchema = z
   );
 export type Credential = z.infer<typeof credentialSchema>;
 
-type Keychain = Pick<typeof Bun.secrets, 'get' | 'set' | 'delete'>;
+export type Keychain = {
+  get(
+    input: { service: string; name: string },
+    signal?: AbortSignal,
+  ): Promise<string | null | undefined>;
+  // Mutation signals gate dispatch only. Once started, await completion rather
+  // than releasing the credential lock while a native side effect is pending.
+  set(
+    input: { service: string; name: string; value: string },
+    signal?: AbortSignal,
+  ): Promise<unknown>;
+  delete(input: { service: string; name: string }, signal?: AbortSignal): Promise<unknown>;
+};
 const service = 'com.orvelt.business-cli.oauth';
 const storageError = () =>
   new AuthError(
     'Credential storage failed. Unlock the OS keychain, or explicitly opt into ORVELT_CREDENTIAL_STORE=file with ORVELT_CONFIG_DIR for headless use. No plaintext fallback was used.',
+    'storage',
+  );
+const unverifiableFileStorageError = () =>
+  new AuthError(
+    'Plaintext credential storage requires verifiable owner-only permissions. Use the OS keychain on Windows, or provide a filesystem with verifiable permissions.',
     'storage',
   );
 function isCode(error: unknown, code: string) {
@@ -62,23 +80,70 @@ function parseCredential(text: string, server: string): Credential {
 }
 
 const key = (server: string) => createHash('sha256').update(server).digest('hex');
+type NativeKeyring = {
+  AsyncEntry: new (
+    service: string,
+    name: string,
+    options?: EntryOptions,
+  ) => Pick<AsyncEntry, 'getPassword' | 'setPassword' | 'deletePassword'>;
+};
+function createOsKeychain(
+  loadKeyring: () => Promise<NativeKeyring> = () => import('@napi-rs/keyring'),
+): Keychain {
+  // Load the native binding only when the default store is used. This keeps the
+  // file-store path usable in minimal/headless installs and gives callers a
+  // small, runtime-neutral seam for tests and alternate keychain providers.
+  let modulePromise: Promise<NativeKeyring> | undefined;
+  const entry = async (name: string, signal?: AbortSignal) => {
+    modulePromise ??= loadKeyring();
+    const { AsyncEntry } = await modulePromise;
+    if (signal) checkAbort(signal);
+    // Auto-fallback may use volatile keyutils; credentials must survive reboot.
+    return new AsyncEntry(service, name, { linux: { store: 'secret-service' } });
+  };
+  return {
+    async get({ name }, signal) {
+      return (await entry(name, signal)).getPassword(signal);
+    },
+    async set({ name, value }, signal) {
+      // N-API cancellation can settle a promise before its side effect finishes.
+      // Never cancel a dispatched mutation: the caller must retain its lock.
+      await (await entry(name, signal)).setPassword(value);
+    },
+    async delete({ name }, signal) {
+      await (await entry(name, signal)).deletePassword();
+    },
+  };
+}
 const owned = (stat: Awaited<ReturnType<typeof lstat>>) =>
   process.getuid === undefined || stat.uid === process.getuid();
-const guard = async <T>(action: () => Promise<T>): Promise<T> =>
-  action().catch(() => {
+const guard = async <T>(action: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
+  if (signal) checkAbort(signal);
+  return action().catch(() => {
+    if (signal) checkAbort(signal);
     throw storageError();
   });
+};
 
 /** One entry per exact resource, including issuer stamps inside the entry. No state or PKCE on disk. */
 export function createCredentialStore({
   env = process.env,
-  keychain = Bun.secrets,
-}: { env?: Record<string, string | undefined>; keychain?: Keychain } = {}) {
+  keychain,
+  loadKeyring,
+  platform = process.platform,
+}: {
+  env?: Record<string, string | undefined>;
+  keychain?: Keychain;
+  loadKeyring?: () => Promise<NativeKeyring>;
+  platform?: NodeJS.Platform;
+} = {}) {
   const mode = env.ORVELT_CREDENTIAL_STORE ?? 'keychain';
   if (mode !== 'keychain' && mode !== 'file')
     throw new AuthError('ORVELT_CREDENTIAL_STORE must be keychain or file.', 'storage');
   if (mode === 'file' && !env.ORVELT_CONFIG_DIR)
     throw new AuthError('File storage requires an explicit ORVELT_CONFIG_DIR.', 'storage');
+  if (mode === 'file' && platform === 'win32') throw unverifiableFileStorageError();
+  const selectedKeychain = keychain ?? createOsKeychain(loadKeyring);
   // Keychain users always share a lock directory, even if their environment differs.
   const directory =
     mode === 'file' && env.ORVELT_CONFIG_DIR
@@ -88,7 +153,12 @@ export function createCredentialStore({
   async function ensureDirectory() {
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const stat = await lstat(directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || !owned(stat) || (stat.mode & 0o077) !== 0)
+    if (
+      !stat.isDirectory() ||
+      stat.isSymbolicLink() ||
+      !owned(stat) ||
+      (platform !== 'win32' && (stat.mode & 0o077) !== 0)
+    )
       throw storageError();
   }
   async function readFile(server: string) {
@@ -105,7 +175,7 @@ export function createCredentialStore({
       if (
         !stat.isFile() ||
         !owned(stat) ||
-        (stat.mode & 0o077) !== 0 ||
+        (platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
         stat.nlink !== 1 ||
         stat.size > 64 * 1024
       )
@@ -125,22 +195,24 @@ export function createCredentialStore({
   }
   return {
     mode,
-    async read(server: string): Promise<Credential | undefined> {
+    async read(server: string, signal?: AbortSignal): Promise<Credential | undefined> {
       return guard(async () => {
         const text =
           mode === 'file'
             ? (await ensureDirectory(), await readFile(server))
-            : await keychain.get({ service, name: key(server) });
+            : await selectedKeychain.get({ service, name: key(server) }, signal);
+        if (signal) checkAbort(signal);
         return text == null ? undefined : parseCredential(text, server);
-      });
+      }, signal);
     },
-    async write(server: string, credential: Credential): Promise<void> {
+    /** Signal gates dispatch only; omit it to finish persisting an issued token response. */
+    async write(server: string, credential: Credential, signal?: AbortSignal): Promise<void> {
       return guard(async () => {
         const text = JSON.stringify(credentialSchema.parse(credential));
         if (credential.server !== server || Buffer.byteLength(text) > 64 * 1024)
           throw storageError();
         if (mode === 'keychain') {
-          await keychain.set({ service, name: key(server), value: text });
+          await selectedKeychain.set({ service, name: key(server), value: text }, signal);
           return;
         }
         await ensureDirectory();
@@ -166,12 +238,13 @@ export function createCredentialStore({
             if (!isCode(error, 'ENOENT')) throw error;
           });
         }
-      });
+      }, signal);
     },
-    async delete(server: string): Promise<void> {
+    /** A started deletion must settle before the caller releases its credential lock. */
+    async delete(server: string, signal?: AbortSignal): Promise<void> {
       return guard(async () => {
         if (mode === 'keychain') {
-          await keychain.delete({ service, name: key(server) });
+          await selectedKeychain.delete({ service, name: key(server) }, signal);
           return;
         }
         await ensureDirectory();
@@ -180,7 +253,7 @@ export function createCredentialStore({
           if (!isCode(error, 'ENOENT')) throw error;
         });
         await syncDirectory();
-      });
+      }, signal);
     },
     /**
      * mkdir is atomic across processes. Hold through read/refresh/save AND use so a waiting

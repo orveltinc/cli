@@ -1,4 +1,5 @@
 import type { Jq, JqInput } from 'jq-wasm/inline';
+import { parentPort } from 'node:worker_threads';
 
 type CompileMessage = { id: number; kind: 'compile'; filter: string };
 type RunMessage = { id: number; kind: 'run'; filter: string; value: JqInput; raw: boolean };
@@ -12,18 +13,18 @@ async function engine() {
 }
 
 function reply(id: number, result: unknown) {
-  // Web Workers do not take Window.postMessage's targetOrigin argument.
+  // Worker postMessage has no Window target origin.
   // oxlint-disable-next-line unicorn/require-post-message-target-origin
-  self.postMessage({ id, ok: true, result });
+  parentPort?.postMessage({ id, ok: true, result });
 }
 
 function failure(id: number, message: string) {
+  // Worker postMessage has no Window target origin.
   // oxlint-disable-next-line unicorn/require-post-message-target-origin
-  self.postMessage({ id, ok: false, error: message });
+  parentPort?.postMessage({ id, ok: false, error: message });
 }
 
-self.addEventListener('message', async (event: MessageEvent<Message>) => {
-  const message = event.data;
+parentPort?.on('message', async (message: Message) => {
   try {
     const jq = await engine();
     if (message.kind === 'compile') {
