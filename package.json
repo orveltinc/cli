@@ -1,6 +1,6 @@
 {
   "name": "@orvelt/cli",
-  "version": "0.1.1",
+  "version": "0.1.8",
   "author": "Orvelt Inc.",
   "license": "Apache-2.0",
   "repository": {
@@ -51,10 +51,10 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@better-auth/oauth-provider": "1.7.14",
+    "@better-auth/oauth-provider": "1.7.18",
     "@orpc/server": "2.0.0-beta.44",
     "@types/bun": "1.4.4",
-    "better-auth": "1.7.14",
+    "better-auth": "1.7.18",
     "typescript": "^7.0.2",
     "oxlint": "^1.86.0",
     "oxfmt": "0.74.0"
