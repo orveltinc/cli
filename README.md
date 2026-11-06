@@ -6,11 +6,9 @@ This is the standalone source repository for `@orvelt/cli`, maintained by Orvelt
 
 Requires **Node.js 20.19 or later**, or **Bun 1.3.3 or later**. Prefer a maintained Node.js LTS release. The repository's development scripts use Bun; the built CLI does not require it.
 
-These runtime compatibility changes are not released yet. The current npm release, **0.1.1**, requires Bun 1.4.2 or later. To use Node.js or an earlier Bun version before the next release, [build and install a tarball from this checkout](#development).
-
 ## Install
 
-Choose your package manager. The Node.js examples require a release containing these compatibility changes; the current release can be run with `bunx --bun` on Bun 1.4.2 or later.
+Choose your package manager.
 
 | Package manager | Install or run                     |
 | --------------- | ---------------------------------- |
@@ -21,8 +19,6 @@ Choose your package manager. The Node.js examples require a release containing t
 | Bun             | `bunx --bun @orvelt/cli --help`    |
 
 For a one-off Node invocation, use `npx @orvelt/cli --help` or `pnpm dlx @orvelt/cli --help`. Replace `--help` with the command you want to run. Bun-only installations should use `bunx --bun` to override the executable's Node shebang.
-
-For the unreleased compatibility fixes, install a local tarball using the [development instructions](#development) instead of the registry package.
 
 ## Quick start
 
